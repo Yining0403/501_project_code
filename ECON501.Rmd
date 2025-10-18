@@ -1,0 +1,185 @@
+---
+title: "ECON501"
+author: "Wenqi Gong, Shuai Zhou, Michael Zhang, Jiahui Xie, Yining Bian"
+date: ''
+output:
+  pdf_document:
+    latex_engine: xelatex
+  html_document: default
+---
+## Package
+
+```{r}
+library(readxl)
+library(vars)
+library(zoo)
+library(urca)
+library(dplyr)
+library(ggplot2)
+library(lpirfs)
+library(tidyr)
+```
+
+## Loading Data
+
+```{r load-data}
+data <- read_xlsx("E:/R/data/P/data.xlsx")
+```
+
+## ADF Test
+
+```{r}
+ur_tests <- list()
+
+variables <- c("EUInt", "EURGDPc", "TBTc", "EUOILPc", "EUBP", "USDEURc", "Stock")
+
+for (var in variables) {
+  ur_tests[[var]] <- ur.df(data[[var]], type = "drift", selectlags = "AIC")
+  print(paste("Unit Root Test for", var))
+  print(summary(ur_tests[[var]]))
+}
+```
+
+## Convert to Stationary data
+
+```{r}
+data$EUInt_diff <- c(NA, diff(data$EUInt))
+data$EURGDPc_diff <- c(NA, diff(data$EURGDPc))
+data$TBTc_diff <- c(NA, diff(data$TBTc))
+```
+
+## Figure out Oil Price Shock into Demand and Supply shock
+
+```{r}
+shock_df <- data %>%
+select(`TIME PERIOD`, EUOILPc, Stock) %>%
+rename(
+oil_price = EUOILPc,
+stock_index = Stock
+) %>%
+arrange(`TIME PERIOD`) %>%
+  mutate(
+    oil_return = (oil_price / lag(oil_price)) - 1,
+    stock_return = (stock_index / lag(stock_index)) - 1,
+    shock_type = case_when(
+      oil_return > 0 & stock_return > 0 ~ "Demand_Positive",
+      oil_return > 0 & stock_return < 0 ~ "Supply_Negative",
+      oil_return < 0 & stock_return < 0 ~ "Demand_Negative",
+      oil_return < 0 & stock_return > 0 ~ "Supply_Positive",
+      TRUE ~ "Neutral"
+    ),
+shock_strength = oil_return * sign(stock_return)
+  )
+```
+
+## Visualize Shock in Selected Time
+
+```{r}
+ggplot(shock_df, aes(x = as.yearqtr(`TIME PERIOD`), y = shock_strength, fill = shock_type)) +
+  geom_col() +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray") +
+  scale_fill_manual(values = c(
+    "Demand_Positive" = "#a6cee3",
+    "Demand_Negative" = "#fb9a99",
+    "Supply_Positive" = "#b2df8a",
+    "Supply_Negative" = "#fdbf6f",
+    "Neutral" = "gray80"
+  )) +
+  labs(
+    title = "Oil Price Shocks (Quarterly, Positive/Negative)",
+    x = "Quarter",
+    y = "Shock Strength",
+    fill = "Shock Type"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## Combine Data
+
+```{r}
+shock_df <- shock_df %>%
+  mutate(
+    demand_pos = ifelse(shock_type == "Demand_Positive", 1, 0),
+    demand_neg = ifelse(shock_type == "Demand_Negative", -1, 0),
+    supply_pos = ifelse(shock_type == "Supply_Positive", 1, 0),
+    supply_neg = ifelse(shock_type == "Supply_Negative", -1, 0)
+  )
+```
+
+
+```{r}
+data <- data %>% rename(Quarter = `TIME PERIOD`)
+shock_df <- shock_df %>% rename(Quarter = `TIME PERIOD`)
+```
+
+```{r}
+var_data <- data %>% 
+  left_join(shock_df %>% select(Quarter, shock_type, demand_pos, demand_neg, supply_pos, supply_neg, shock_strength), by = "Quarter")
+var_data <- var_data %>%
+  select(Quarter, USDEURc, EUInt_diff, EURGDPc_diff, TBTc_diff, EUBP, shock_type, demand_pos, demand_neg, supply_pos, supply_neg, shock_strength) 
+var_data <- var_data[-1, ]
+```
+
+## VAR Models
+
+```{r}
+demand_pos_data <- var_data %>% filter(demand_pos == 1)
+
+var_demand_pos <- VAR(demand_pos_data %>% 
+                        select(USDEURc, EUInt_diff, EURGDPc_diff, 
+                               TBTc_diff, EUBP, shock_strength),
+                      p = 1, type = "const")
+
+impulse_vars <- c("shock_strength","EUInt_diff", "EURGDPc_diff", "TBTc_diff", "EUBP")
+for (impulse_var in impulse_vars) {
+irf_result <- irf(var_demand_pos, impulse = impulse_var, response = "USDEURc", n.ahead = 10, ortho = TRUE)
+plot(irf_result, main = paste("IRF of USDEURc to", impulse_var))
+}
+
+```
+
+```{r}
+demand_neg_data <- var_data %>% filter(demand_neg == -1)
+var_demand_neg <- VAR(demand_neg_data %>% 
+                        select(USDEURc, EUInt_diff, EURGDPc_diff, 
+                               TBTc_diff, EUBP, shock_strength),
+                      p = 1, type = "const")
+
+impulse_vars <- c("shock_strength","EUInt_diff", "EURGDPc_diff", "TBTc_diff", "EUBP")
+for (impulse_var in impulse_vars) {
+irf_result <- irf(var_demand_neg, impulse = impulse_var, response = "USDEURc", n.ahead = 10, ortho = TRUE)
+plot(irf_result, main = paste("IRF of USDEURc to", impulse_var))
+}
+```
+
+```{r}
+supply_pos_data <- var_data %>% filter(supply_pos == 1)
+var_supply_pos <- VAR(supply_pos_data %>% 
+                        select(USDEURc, EUInt_diff, EURGDPc_diff, 
+                               TBTc_diff, EUBP, shock_strength),
+                      p = 1, type = "const")
+
+
+impulse_vars <- c("shock_strength","EUInt_diff", "EURGDPc_diff", "TBTc_diff", "EUBP")
+for (impulse_var in impulse_vars) {
+irf_result <- irf(var_supply_pos, impulse = impulse_var, response = "USDEURc", n.ahead = 10, ortho = FALSE)
+plot(irf_result, main = paste("IRF of USDEURc to", impulse_var))
+}
+```
+
+
+
+```{r}
+supply_neg_data <- var_data %>% filter(supply_neg == -1)
+var_supply_neg <- VAR(demand_neg_data %>% 
+                        select(USDEURc, EUInt_diff, EURGDPc_diff, 
+                               TBTc_diff, EUBP, shock_strength),
+                      p = 1, type = "const")
+impulse_vars <- c("shock_strength", "EUInt_diff", "EURGDPc_diff", "TBTc_diff", "EUBP")
+for (impulse_var in impulse_vars) {
+irf_result <- irf(var_supply_neg, impulse = impulse_var, response = "USDEURc", n.ahead = 10, ortho = TRUE)
+plot(irf_result, main = paste("IRF of USDEURc to", impulse_var))
+}
+```
+
